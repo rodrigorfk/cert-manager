@@ -19,6 +19,7 @@ package certificaterequests
 import (
 	"context"
 	"fmt"
+	corelisters "k8s.io/client-go/listers/core/v1"
 
 	"github.com/go-logr/logr"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -61,6 +62,7 @@ type Controller struct {
 	fieldManager string
 
 	certificateRequestLister cmlisters.CertificateRequestLister
+	secretLister             corelisters.SecretLister
 
 	queue workqueue.RateLimitingInterface
 
@@ -120,8 +122,10 @@ func (c *Controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitin
 	// create a queue used to queue up items to be processed
 	c.queue = workqueue.NewNamedRateLimitingQueue(controllerpkg.DefaultItemBasedRateLimiter(), componentName)
 
+	secretsInformer := ctx.KubeSharedInformerFactory.Core().V1().Secrets()
 	issuerInformer := ctx.SharedInformerFactory.Certmanager().V1().Issuers()
 	c.issuerLister = issuerInformer.Lister()
+	c.secretLister = secretsInformer.Lister()
 
 	// obtain references to all the informers used by this controller
 	certificateRequestInformer := ctx.SharedInformerFactory.Certmanager().V1().CertificateRequests()
@@ -129,6 +133,7 @@ func (c *Controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitin
 	mustSync := []cache.InformerSynced{
 		certificateRequestInformer.Informer().HasSynced,
 		issuerInformer.Informer().HasSynced,
+		secretsInformer.Informer().HasSynced,
 	}
 
 	// build a list of InformerSynced functions that will be returned by the
