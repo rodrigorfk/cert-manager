@@ -18,6 +18,7 @@ package vault
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"net"
@@ -182,6 +183,22 @@ func NewVaultKubernetesSecret(secretName, serviceAccountName string) *corev1.Sec
 	}
 }
 
+func NewVaultClientCertificateSecret(secretName, serviceAccountName string, certificate, key []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: secretName,
+			Annotations: map[string]string{
+				"kubernetes.io/service-account.name": serviceAccountName,
+			},
+		},
+		Data: map[string][]byte{
+			corev1.TLSCertKey:       certificate,
+			corev1.TLSPrivateKeyKey: key,
+		},
+		Type: corev1.SecretTypeTLS,
+	}
+}
+
 // Set up a new Vault client, port-forward to the Vault instance.
 func (v *VaultInitializer) Init() error {
 	cfg := vault.DefaultConfig()
@@ -192,6 +209,13 @@ func (v *VaultInitializer) Init() error {
 		return fmt.Errorf("error loading Vault CA bundle: %s", v.details.VaultCA)
 	}
 	cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs = caCertPool
+	if v.details.EnforceMtls {
+		clientCertificate, err := tls.X509KeyPair(v.details.VaultClientCertificate, v.details.VaultClientPrivateKey)
+		if err != nil {
+			return fmt.Errorf("unable to read vault client certificate: %s", err)
+		}
+		cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.Certificates = []tls.Certificate{clientCertificate}
+	}
 
 	client, err := vault.NewClient(cfg)
 	if err != nil {
@@ -208,7 +232,7 @@ func (v *VaultInitializer) Init() error {
 			return fmt.Errorf("error parsing proxy URL: %s", err.Error())
 		}
 		var lastError error
-		err = wait.PollUntilContextTimeout(context.TODO(), time.Second, 20*time.Second, true, func(ctx context.Context) (bool, error) {
+		err = wait.PollUntilContextTimeout(context.TODO(), time.Second, 45*time.Second, true, func(ctx context.Context) (bool, error) {
 			conn, err := net.DialTimeout("tcp", proxyUrl.Host, time.Second)
 			if err != nil {
 				lastError = err

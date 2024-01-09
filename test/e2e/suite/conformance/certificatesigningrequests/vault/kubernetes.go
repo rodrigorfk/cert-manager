@@ -19,6 +19,8 @@ package vault
 import (
 	"context"
 	"fmt"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -69,11 +71,15 @@ type kubernetes struct {
 	// saTokenSecretName is the name of the Secret containing the service account token
 	saTokenSecretName string
 
+	// vaultClientCertificateSecretName is the name of the Secret containing the Vault client certificate
+	vaultClientCertificateSecretName string
+
 	setup *vault.VaultInitializer
 }
 
 func (k *kubernetes) createIssuer(f *framework.Framework) string {
-	k.initVault(f, f.Namespace.Name)
+	details := addon.VaultEnforceMtls.Details()
+	k.initVault(f, f.Namespace.Name, details)
 
 	By("Creating a VaultKubernetes Issuer")
 	issuer, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), &cmapi.Issuer{
@@ -81,7 +87,7 @@ func (k *kubernetes) createIssuer(f *framework.Framework) string {
 			GenerateName: "vault-issuer-",
 			Namespace:    f.Namespace.Name,
 		},
-		Spec: k.issuerSpec(f),
+		Spec: k.issuerSpec(f, details),
 	}, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred())
 
@@ -94,14 +100,15 @@ func (k *kubernetes) createIssuer(f *framework.Framework) string {
 }
 
 func (k *kubernetes) createClusterIssuer(f *framework.Framework) string {
-	k.initVault(f, f.Config.Addons.CertManager.ClusterResourceNamespace)
+	details := addon.VaultEnforceMtls.Details()
+	k.initVault(f, f.Config.Addons.CertManager.ClusterResourceNamespace, details)
 
 	By("Creating a VaultKubernetes ClusterIssuer")
 	issuer, err := f.CertManagerClientSet.CertmanagerV1().ClusterIssuers().Create(context.TODO(), &cmapi.ClusterIssuer{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "vault-issuer-",
 		},
-		Spec: k.issuerSpec(f),
+		Spec: k.issuerSpec(f, details),
 	}, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred())
 
@@ -125,12 +132,12 @@ func (k *kubernetes) delete(f *framework.Framework, signerName string) {
 	Expect(k.setup.Clean()).NotTo(HaveOccurred(), "failed to deprovision vault initializer")
 }
 
-func (k *kubernetes) initVault(f *framework.Framework, boundNS string) {
+func (k *kubernetes) initVault(f *framework.Framework, boundNS string, details *vault.Details) {
 	By("Configuring the VaultKubernetes server")
 
 	k.setup = vault.NewVaultInitializerKubernetes(
 		addon.Base.Details().KubeClient,
-		*addon.Vault.Details(),
+		*details,
 		k.testWithRootCA,
 		"https://kubernetes.default.svc.cluster.local",
 	)
@@ -147,15 +154,19 @@ func (k *kubernetes) initVault(f *framework.Framework, boundNS string) {
 	k.saTokenSecretName = "vault-sa-secret-" + util.RandStringRunes(5)
 	_, err = f.KubeClientSet.CoreV1().Secrets(boundNS).Create(context.TODO(), vault.NewVaultKubernetesSecret(k.saTokenSecretName, boundSA), metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred())
+
+	k.vaultClientCertificateSecretName = "vault-client-cert-secret-" + rand.String(5)
+	_, err = f.KubeClientSet.CoreV1().Secrets(boundNS).Create(context.TODO(), vault.NewVaultClientCertificateSecret(k.vaultClientCertificateSecretName, boundSA, details.VaultClientCertificate, details.VaultClientPrivateKey), metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred())
 }
 
-func (k *kubernetes) issuerSpec(f *framework.Framework) cmapi.IssuerSpec {
-	return cmapi.IssuerSpec{
+func (k *kubernetes) issuerSpec(f *framework.Framework, details *vault.Details) cmapi.IssuerSpec {
+	issuerSpec := cmapi.IssuerSpec{
 		IssuerConfig: cmapi.IssuerConfig{
 			Vault: &cmapi.VaultIssuer{
-				Server:   addon.Vault.Details().URL,
+				Server:   details.URL,
 				Path:     k.setup.IntermediateSignPath(),
-				CABundle: addon.Vault.Details().VaultCA,
+				CABundle: details.VaultCA,
 				Auth: cmapi.VaultAuth{
 					Kubernetes: &cmapi.VaultKubernetesAuth{
 						Path: k.setup.KubernetesAuthPath(),
@@ -170,4 +181,19 @@ func (k *kubernetes) issuerSpec(f *framework.Framework) cmapi.IssuerSpec {
 			},
 		},
 	}
+	if details.EnforceMtls {
+		issuerSpec.IssuerConfig.Vault.ClientCertSecretRef = &cmmeta.SecretKeySelector{
+			LocalObjectReference: cmmeta.LocalObjectReference{
+				Name: k.vaultClientCertificateSecretName,
+			},
+			Key: corev1.TLSCertKey,
+		}
+		issuerSpec.IssuerConfig.Vault.ClientKeySecretRef = &cmmeta.SecretKeySelector{
+			LocalObjectReference: cmmeta.LocalObjectReference{
+				Name: k.vaultClientCertificateSecretName,
+			},
+			Key: corev1.TLSPrivateKeyKey,
+		}
+	}
+	return issuerSpec
 }
